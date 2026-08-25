@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Visomoot APK
 
 on:
   workflow_dispatch:
@@ -15,6 +15,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -26,14 +27,17 @@ jobs:
         run: npm install
 
       - name: Generate Android project
-        run: npx expo prebuild --platform android
+        env:
+          CI: '1'
+        run: npx expo prebuild --platform android --clean
 
-      - name: Build APK
+      - name: Build standalone release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Visomoot-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
