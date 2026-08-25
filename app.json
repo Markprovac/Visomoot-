@@ -1,25 +1,25 @@
 {
   "expo": {
-    "name": "RandoRadar",
-    "slug": "randoradar",
+    "name": "Visomoot",
+    "slug": "visomoot",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.randoradar.mobile"
+      "bundleIdentifier": "com.visomoot.mobile"
     },
     "android": {
-      "package": "com.randoradar.mobile"
+      "package": "com.visomoot.mobile"
     },
     "plugins": [
       "@maplibre/maplibre-react-native",
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "RandoRadar utilise votre position pour afficher votre position sur la carte et enregistrer votre activité.",
-          "locationAlwaysAndWhenInUsePermission": "RandoRadar utilise votre position en arrière-plan pour continuer l'enregistrement quand l'écran est verrouillé.",
+          "locationWhenInUsePermission": "Visomoot utilise votre position pour afficher votre position sur la carte et enregistrer votre activité.",
+          "locationAlwaysAndWhenInUsePermission": "Visomoot utilise votre position en arrière-plan pour continuer l’enregistrement quand l’écran est verrouillé.",
           "isIosBackgroundLocationEnabled": true,
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true

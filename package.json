@@ -1,10 +1,10 @@
 {
-  "name": "randoradar",
+  "name": "visomoot",
   "version": "0.1.0",
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
-    "start": "expo start --dev-client",
+    "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "prebuild": "expo prebuild"
@@ -17,8 +17,7 @@
     "expo-status-bar": "~57.0.0",
     "expo-task-manager": "~57.0.12",
     "react": "19.2.3",
-    "react-native": "0.86.0",
-    "expo-dev-client": "~57.0.11"
+    "react-native": "0.86.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.0",
