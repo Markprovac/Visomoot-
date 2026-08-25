@@ -1,0 +1,30 @@
+{
+  "expo": {
+    "name": "RandoRadar",
+    "slug": "randoradar",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.randoradar.mobile"
+    },
+    "android": {
+      "package": "com.randoradar.mobile"
+    },
+    "plugins": [
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "RandoRadar utilise votre position pour afficher votre position sur la carte et enregistrer votre activité.",
+          "locationAlwaysAndWhenInUsePermission": "RandoRadar utilise votre position en arrière-plan pour continuer l'enregistrement quand l'écran est verrouillé.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ]
+    ]
+  }
+}
