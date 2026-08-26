@@ -387,6 +387,19 @@ export default function App() {
     [liveCoordinate],
   );
 
+
+  const searchedPlaceGeoJson = useMemo(
+    () => searchPlace ? ({
+      type: 'Feature' as const,
+      properties: { name: searchPlace.name },
+      geometry: {
+        type: 'Point' as const,
+        coordinates: [searchPlace.longitude, searchPlace.latitude] as [number, number],
+      },
+    }) : null,
+    [searchPlace],
+  );
+
   const weatherPointGeoJson = useMemo(() => {
     if (!routeWeather?.alert) return null;
     return {
@@ -497,9 +510,14 @@ export default function App() {
     setSearchError(null);
     setInitialCenter(center);
 
-    if (mapReady) {
-      await cameraRef.current?.easeTo({ center, zoom: 13.5, duration: 500 });
-    }
+    // Revenir directement à la carte pour que le résultat choisi soit visible.
+    // Le lieu reste mémorisé afin de pouvoir rouvrir Rechercher puis lancer
+    // « Parcours connus autour » sur cette même zone.
+    setSearchOpen(false);
+
+    setTimeout(() => {
+      cameraRef.current?.easeTo({ center, zoom: 14.5, duration: 650 });
+    }, 220);
   };
 
   const useGpsForSearch = async () => {
@@ -923,6 +941,23 @@ export default function App() {
           </GeoJSONSource>
         )}
 
+
+        {searchedPlaceGeoJson && (
+          <GeoJSONSource id="searched-place" data={searchedPlaceGeoJson}>
+            <Layer
+              id="searched-place-point"
+              type="circle"
+              source="searched-place"
+              paint={{
+                'circle-radius': 9,
+                'circle-color': '#E05B21',
+                'circle-stroke-color': '#FFFFFF',
+                'circle-stroke-width': 4,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+
         {!planning && displayRoutePoints.length >= 2 && (
           <GeoJSONSource id="selected-route" data={selectedLineGeoJson}>
             <Layer
@@ -1243,7 +1278,7 @@ export default function App() {
             {searchPlace && (
               <View style={styles.selectedPlaceCard}>
                 <Text style={styles.selectedPlaceTitle}>📍 Zone choisie : {searchPlace.name}</Text>
-                <Text style={styles.selectedPlaceSub}>La carte est centrée ici. Tu peux fermer puis toucher « Créer » pour tracer ton propre parcours.</Text>
+                <Text style={styles.selectedPlaceSub}>Ce lieu est mémorisé. En le choisissant, Visomoot revient directement sur la carte. Rouvre cette recherche pour afficher les parcours connus autour.</Text>
                 <Pressable onPress={runKnownRouteSearch} disabled={knownRoutesBusy} style={styles.knownRouteSearchButton}>
                   {knownRoutesBusy ? <ActivityIndicator /> : <Text style={styles.knownRouteSearchText}>🥾🚴 Parcours connus autour</Text>}
                 </Pressable>
