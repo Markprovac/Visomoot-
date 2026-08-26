@@ -1,6 +1,20 @@
-# Visomoot — V0.2 native Android / iPhone
+# Visomoot — V0.6 native Android / iPhone
 
 Application outdoor personnelle inspirée de Komoot, avec carte topo, création d'itinéraires et météo sur le parcours.
+
+
+## V0.6 — recherche, parcours connus, GPX et radar animé
+
+Cette version repart de la V0.5 et conserve l’export GPX ainsi que les fiches d’activités détaillées. Elle ajoute :
+
+- recherche d’une ville, d’un village ou d’un lieu ;
+- recherche de parcours balisés connus autour d’une zone ou de la position GPS ;
+- chargement de ces parcours sur la carte ;
+- bouton Démarrer remonté au-dessus de la barre Android ;
+- boutons Fermer / Retour des activités plus grands et plus accessibles ;
+- radar RainViewer animé automatiquement avec les images observées des deux dernières heures.
+
+Le radar public RainViewer ne fournit plus de prévision future gratuite en 2026. La prévision « pluie devant toi » reste donc calculée séparément par la météo du parcours.
 
 ## V0.2 — déjà inclus
 
@@ -86,3 +100,8 @@ Visomoot demande la localisation précise et la localisation en arrière-plan et
 - Radar : RainViewer
 
 Le projet ne contient pas de clé API payante.
+
+
+## Import GPX
+
+La v0.7 ajoute un bouton **📥 GPX** permettant de choisir un fichier `.gpx`, de l’afficher sur la carte, de zoomer dessus, d’en calculer distance et dénivelé si disponible, puis de l’enregistrer comme parcours Visomoot.
