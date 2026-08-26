@@ -9,10 +9,44 @@ export interface KnownRouteSummary {
   center?: [number, number];
 }
 
+const OVERPASS_ENDPOINTS = [
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://lz4.overpass-api.de/api/interpreter',
+  'https://z.overpass-api.de/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
+];
+
 function routeFilterForSport(sport: SportType) {
   if (sport === 'hiking') return '^(hiking|foot)$';
   if (sport === 'mtb') return '^(mtb|bicycle)$';
   return '^bicycle$';
+}
+
+async function fetchOverpassJson(query: string): Promise<any> {
+  const failures: string[] = [];
+
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      // GET est volontaire ici : certains proxys/versions Android renvoient 406
+      // sur les POST application/x-www-form-urlencoded vers Overpass.
+      const url = `${endpoint}?data=${encodeURIComponent(query)}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+      });
+
+      if (response.ok) {
+        return await response.json();
+      }
+
+      failures.push(`${response.status}`);
+    } catch {
+      failures.push('réseau');
+    }
+  }
+
+  const detail = failures.length ? ` (${failures.join(', ')})` : '';
+  throw new Error(`Recherche de parcours momentanément indisponible${detail}.`);
 }
 
 export async function findKnownRoutes(
@@ -26,40 +60,33 @@ export async function findKnownRoutes(
 [out:json][timeout:25];
 relation(around:${Math.round(radiusM)},${latitude},${longitude})
   ["type"="route"]
-  ["route"~"${routePattern}"]
-  ["name"];
-out tags center 40;
+  ["route"~"${routePattern}"];
+out tags center 80;
 `;
 
-  const response = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      Accept: 'application/json',
-    },
-    body: `data=${encodeURIComponent(query)}`,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Recherche de parcours indisponible (${response.status}).`);
-  }
-
-  const data = await response.json();
+  const data = await fetchOverpassJson(query);
   const elements = Array.isArray(data?.elements) ? data.elements : [];
 
   return elements
-    .filter((element: any) => element?.type === 'relation' && element?.tags?.name)
-    .map((element: any) => ({
-      id: Number(element.id),
-      name: String(element.tags.name),
-      ref: element.tags.ref ? String(element.tags.ref) : undefined,
-      network: element.tags.network ? String(element.tags.network) : undefined,
-      routeType: element.tags.route ? String(element.tags.route) : 'route',
-      center:
-        element.center && Number.isFinite(Number(element.center.lon)) && Number.isFinite(Number(element.center.lat))
-          ? [Number(element.center.lon), Number(element.center.lat)] as [number, number]
-          : undefined,
-    }))
+    .filter((element: any) => element?.type === 'relation')
+    .map((element: any) => {
+      const ref = element?.tags?.ref ? String(element.tags.ref) : undefined;
+      const rawName = element?.tags?.name ? String(element.tags.name) : undefined;
+      const name = rawName || (ref ? `Itinéraire ${ref}` : `Parcours OSM ${element.id}`);
+
+      return {
+        id: Number(element.id),
+        name,
+        ref,
+        network: element?.tags?.network ? String(element.tags.network) : undefined,
+        routeType: element?.tags?.route ? String(element.tags.route) : 'route',
+        center:
+          element.center && Number.isFinite(Number(element.center.lon)) && Number.isFinite(Number(element.center.lat))
+            ? [Number(element.center.lon), Number(element.center.lat)] as [number, number]
+            : undefined,
+      } as KnownRouteSummary;
+    })
+    .filter((route: KnownRouteSummary) => Number.isFinite(route.id))
     .sort((a: KnownRouteSummary, b: KnownRouteSummary) => {
       const aRef = a.ref ? 0 : 1;
       const bRef = b.ref ? 0 : 1;
@@ -98,20 +125,7 @@ rel(${relationId});
 out body geom;
 `;
 
-  const response = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      Accept: 'application/json',
-    },
-    body: `data=${encodeURIComponent(query)}`,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Impossible de charger le parcours (${response.status}).`);
-  }
-
-  const data = await response.json();
+  const data = await fetchOverpassJson(query);
   const relation = Array.isArray(data?.elements)
     ? data.elements.find((element: any) => element?.type === 'relation' && Number(element.id) === relationId)
     : null;
