@@ -212,10 +212,12 @@ export async function getRecentActivities(limit = 20): Promise<Activity[]> {
 export async function saveRoute(
   sport: SportType,
   coordinates: Array<[number, number]>,
+  nameOverride?: string,
 ): Promise<SavedRoute> {
   const db = await dbPromise;
   const createdAt = Date.now();
-  const name = `${sport === 'hiking' ? 'Randonnée' : sport === 'road_bike' ? 'Vélo route' : sport === 'gravel' ? 'Gravel' : 'VTT'} — ${new Date(createdAt).toLocaleDateString()}`;
+  const generatedName = `${sport === 'hiking' ? 'Randonnée' : sport === 'road_bike' ? 'Vélo route' : sport === 'gravel' ? 'Gravel' : 'VTT'} — ${new Date(createdAt).toLocaleDateString()}`;
+  const name = nameOverride?.trim() || generatedName;
 
   const result = await db.runAsync(
     'INSERT INTO routes (name, sport, created_at) VALUES (?, ?, ?)',
@@ -248,4 +250,12 @@ export async function getRoutePoints(routeId: number): Promise<Array<[number, nu
     routeId,
   );
   return rows.map((row) => [Number(row.longitude), Number(row.latitude)] as [number, number]);
+}
+
+export async function deleteActivity(id: number) {
+  const db = await dbPromise;
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('DELETE FROM track_points WHERE activity_id=?', id);
+    await db.runAsync('DELETE FROM activities WHERE id=?', id);
+  });
 }
