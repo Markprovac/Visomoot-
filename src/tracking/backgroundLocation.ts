@@ -1,8 +1,8 @@
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
-import { getActiveActivity, initDb, insertTrackPoint } from '../storage/db';
+import { getActiveActivity, initDb, insertTrackPointIfMeaningful } from '../storage/db';
 
-export const LOCATION_TASK_NAME = 'RANDORADAR_BACKGROUND_LOCATION';
+export const LOCATION_TASK_NAME = 'VISOMOOT_BACKGROUND_LOCATION';
 
 TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
   if (error) return;
@@ -16,7 +16,7 @@ TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
 
   for (const location of locations) {
     const c = location.coords;
-    await insertTrackPoint({
+    await insertTrackPointIfMeaningful({
       activityId: activity.id,
       latitude: c.latitude,
       longitude: c.longitude,
@@ -46,14 +46,13 @@ export async function startBackgroundTracking() {
 
   await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
     accuracy: Location.Accuracy.BestForNavigation,
-    distanceInterval: 5,
-    timeInterval: 3000,
+    distanceInterval: 3,
+    timeInterval: 2000,
     pausesUpdatesAutomatically: false,
-    showsBackgroundLocationIndicator: true,
     activityType: Location.ActivityType.Fitness,
     foregroundService: {
-      notificationTitle: 'RandoRadar — activité en cours',
-      notificationBody: 'Le suivi GPS continue même écran verrouillé.',
+      notificationTitle: 'Visomoot — activité en cours',
+      notificationBody: 'Le suivi GPS continue tant que le système ne force pas l’arrêt.',
       killServiceOnDestroy: false,
     },
   });
