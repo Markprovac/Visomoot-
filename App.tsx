@@ -19,7 +19,6 @@ import {
   Layer,
   Map,
   RasterSource,
-  UserLocation,
 } from '@maplibre/maplibre-react-native';
 import {
   createActivity,
@@ -85,6 +84,8 @@ function humanRouteTime(seconds: number) {
 
 export default function App() {
   const appStateRef = useRef(AppState.currentState);
+  const cameraRef = useRef<any>(null);
+  const [mapReady, setMapReady] = useState(false);
   const liveCoordinateRef = useRef<[number, number] | null>(null);
   const liveSpeedRef = useRef<number | null>(null);
 
@@ -209,7 +210,10 @@ export default function App() {
       const loaded = await getTrackPoints(activity.id);
       setPoints(loaded);
       const last = loaded[loaded.length - 1];
-      if (last) liveSpeedRef.current = Math.max(0, (last.speed ?? 0) * 3.6);
+      if (last) {
+        const center: [number, number] = [last.longitude, last.latitude];
+        setLivePosition(center, last.speed);
+      }
     }, 1500);
     return () => clearInterval(timer);
   }, [activity?.id]);
@@ -248,47 +252,6 @@ export default function App() {
       clearInterval(timer);
     };
   }, [radarEnabled]);
-
-  useEffect(() => {
-    let subscription: Location.LocationSubscription | null = null;
-    let mounted = true;
-
-    (async () => {
-      if (!activity || activity.state !== 'active') return;
-      const fg = await Location.getForegroundPermissionsAsync();
-      if (fg.status !== 'granted') return;
-
-      subscription = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.BestForNavigation,
-          distanceInterval: 3,
-          timeInterval: 2000,
-          mayShowUserSettingsDialog: true,
-        },
-        async (location) => {
-          if (!mounted) return;
-          const center: [number, number] = [location.coords.longitude, location.coords.latitude];
-          setLivePosition(center, location.coords.speed);
-
-          await insertTrackPointIfMeaningful({
-            activityId: activity.id,
-            latitude: location.coords.latitude,
-            longitude: location.coords.longitude,
-            altitude: location.coords.altitude ?? null,
-            accuracy: location.coords.accuracy ?? null,
-            speed: location.coords.speed ?? null,
-            heading: location.coords.heading ?? null,
-            timestamp: location.timestamp || Date.now(),
-          });
-        },
-      );
-    })();
-
-    return () => {
-      mounted = false;
-      subscription?.remove();
-    };
-  }, [activity?.id, activity?.state]);
 
   const stats = useMemo(
     () => (activity ? computeStats(points, activity.startedAt, activity.endedAt) : null),
@@ -333,6 +296,15 @@ export default function App() {
       geometry: { type: 'LineString' as const, coordinates: displayRoutePoints },
     }),
     [displayRoutePoints],
+  );
+
+  const livePointGeoJson = useMemo(
+    () => liveCoordinate ? ({
+      type: 'Feature' as const,
+      properties: {},
+      geometry: { type: 'Point' as const, coordinates: liveCoordinate },
+    }) : null,
+    [liveCoordinate],
   );
 
   const weatherPointGeoJson = useMemo(() => {
@@ -390,6 +362,33 @@ export default function App() {
     }
   };
 
+  const centerOnGps = async () => {
+    try {
+      const fg = await Location.requestForegroundPermissionsAsync();
+      if (fg.status !== 'granted') {
+        Alert.alert('GPS non autorisé', 'Autorise la localisation précise pour afficher ta position sur la carte.');
+        return;
+      }
+
+      const current = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+      const center: [number, number] = [current.coords.longitude, current.coords.latitude];
+      setLivePosition(center, current.coords.speed);
+      setInitialCenter(center);
+
+      if (mapReady) {
+        await cameraRef.current?.easeTo({
+          center,
+          zoom: activity?.state === 'active' ? 15.5 : 16,
+          duration: 450,
+        });
+      }
+    } catch (error: any) {
+      Alert.alert('Position GPS', error?.message || 'Impossible de récupérer la position pour le moment.');
+    }
+  };
+
   const start = async () => {
     if (activity) return;
     setPlanning(false);
@@ -406,33 +405,38 @@ export default function App() {
 
       const routeForActivity = selectedRouteId ? selectedRoutePoints : [];
       const created = await createActivity(sport, selectedRouteId);
-      setActivity(created);
-      setActiveRoutePoints(routeForActivity);
-      setPoints([]);
-      setExpanded(true);
 
       try {
-        const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
-        const center: [number, number] = [current.coords.longitude, current.coords.latitude];
-        setLivePosition(center, current.coords.speed);
-        setInitialCenter(center);
+        try {
+          const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+          const center: [number, number] = [current.coords.longitude, current.coords.latitude];
+          setLivePosition(center, current.coords.speed);
+          setInitialCenter(center);
 
-        await insertTrackPointIfMeaningful({
-          activityId: created.id,
-          latitude: current.coords.latitude,
-          longitude: current.coords.longitude,
-          altitude: current.coords.altitude ?? null,
-          accuracy: current.coords.accuracy ?? null,
-          speed: current.coords.speed ?? null,
-          heading: current.coords.heading ?? null,
-          timestamp: current.timestamp || Date.now(),
-        });
-      } catch {
-        // Le premier fix peut arriver quelques secondes après le départ.
+          await insertTrackPointIfMeaningful({
+            activityId: created.id,
+            latitude: current.coords.latitude,
+            longitude: current.coords.longitude,
+            altitude: current.coords.altitude ?? null,
+            accuracy: current.coords.accuracy ?? null,
+            speed: current.coords.speed ?? null,
+            heading: current.coords.heading ?? null,
+            timestamp: current.timestamp || Date.now(),
+          });
+        } catch {
+          // Le premier fix peut arriver quelques secondes après le départ.
+        }
+
+        await startBackgroundTracking();
+      } catch (trackingError) {
+        await finishActivity(created.id);
+        throw trackingError;
       }
 
-      await startBackgroundTracking();
+      setActivity(created);
+      setActiveRoutePoints(routeForActivity);
       setPoints(await getTrackPoints(created.id));
+      setExpanded(true);
     } catch (error: any) {
       Alert.alert('Erreur Visomoot', error?.message || 'Impossible de démarrer l’activité.');
     }
@@ -447,8 +451,13 @@ export default function App() {
         setActivity({ ...activity, state: 'paused' });
       } else {
         await setActivityState(activity.id, 'active');
-        setActivity({ ...activity, state: 'active' });
-        await startBackgroundTracking();
+        try {
+          await startBackgroundTracking();
+          setActivity({ ...activity, state: 'active' });
+        } catch (trackingError) {
+          await setActivityState(activity.id, 'paused');
+          throw trackingError;
+        }
       }
     } catch (error: any) {
       Alert.alert('Erreur Visomoot', error?.message || 'Impossible de changer l’état de l’activité.');
@@ -532,13 +541,40 @@ export default function App() {
     <View style={styles.root}>
       <StatusBar style="dark" />
 
-      <Map style={styles.map} mapStyle={MAP_STYLE as any} logo attribution compass onPress={onMapPress}>
+      <Map
+        style={styles.map}
+        mapStyle={MAP_STYLE as any}
+        androidView="texture"
+        logo
+        attribution
+        compass
+        onPress={onMapPress}
+        onDidFinishLoadingMap={() => setMapReady(true)}
+      >
         <Camera
+          ref={cameraRef}
           initialViewState={{ center: initialCenter, zoom: 13 }}
-          trackUserLocation={activity?.state === 'active' ? 'course' : undefined}
+          center={activity?.state === 'active' && liveCoordinate ? liveCoordinate : undefined}
           zoom={activity?.state === 'active' ? 15.5 : undefined}
+          duration={350}
+          easing="ease"
         />
-        <UserLocation animated accuracy heading />
+
+        {livePointGeoJson && (
+          <GeoJSONSource id="live-gps-position" data={livePointGeoJson}>
+            <Layer
+              id="live-gps-position-point"
+              type="circle"
+              source="live-gps-position"
+              paint={{
+                'circle-radius': 8,
+                'circle-color': '#1976D2',
+                'circle-stroke-color': '#FFFFFF',
+                'circle-stroke-width': 3,
+              }}
+            />
+          </GeoJSONSource>
+        )}
 
         {!planning && displayRoutePoints.length >= 2 && (
           <GeoJSONSource id="selected-route" data={selectedLineGeoJson}>
@@ -623,6 +659,13 @@ export default function App() {
           </RasterSource>
         )}
       </Map>
+
+      <View style={styles.gpsButtonWrap} pointerEvents="box-none">
+        <Pressable onPress={centerOnGps} style={styles.gpsButton} accessibilityLabel="Centrer la carte sur ma position GPS">
+          <Text style={styles.gpsButtonIcon}>⌖</Text>
+          <Text style={styles.gpsButtonLabel}>GPS</Text>
+        </Pressable>
+      </View>
 
       <SafeAreaView pointerEvents="box-none" style={styles.overlay}>
         <View style={styles.topBar}>
@@ -844,6 +887,11 @@ const styles = StyleSheet.create({
   createActive: { backgroundColor: '#FFE9DE' },
   disabled: { opacity: 0.42 },
   actionText: { fontWeight: '800', color: '#24343D' },
+
+  gpsButtonWrap: { position: 'absolute', right: 12, top: 150 },
+  gpsButton: { width: 54, height: 54, borderRadius: 27, backgroundColor: 'rgba(255,255,255,0.97)', alignItems: 'center', justifyContent: 'center', elevation: 7 },
+  gpsButtonIcon: { fontSize: 25, lineHeight: 25, fontWeight: '900', color: '#1565C0' },
+  gpsButtonLabel: { marginTop: 1, fontSize: 9, fontWeight: '900', color: '#31566F' },
 
   startWrap: { padding: 14, gap: 9 },
   startButton: { backgroundColor: '#163F2B', borderRadius: 22, paddingVertical: 16, alignItems: 'center', elevation: 5 },

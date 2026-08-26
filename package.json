@@ -1,6 +1,6 @@
 {
   "name": "visomoot",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
@@ -10,14 +10,14 @@
     "prebuild": "expo prebuild"
   },
   "dependencies": {
-    "@maplibre/maplibre-react-native": "11.3.7",
+    "@maplibre/maplibre-react-native": "11.3.6",
     "expo": "~57.0.16",
-    "expo-location": "~57.0.9",
+    "expo-location": "~57.0.12",
     "expo-sqlite": "~57.0.1",
     "expo-status-bar": "~57.0.0",
     "expo-task-manager": "~57.0.12",
     "react": "19.2.3",
-    "react-native": "0.86.0"
+    "react-native": "0.86.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.0",

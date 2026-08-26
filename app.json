@@ -2,7 +2,7 @@
   "expo": {
     "name": "Visomoot",
     "slug": "visomoot",
-    "version": "0.2.0",
+    "version": "0.4.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -11,7 +11,11 @@
       "bundleIdentifier": "com.visomoot.mobile"
     },
     "android": {
-      "package": "com.visomoot.mobile"
+      "package": "com.visomoot.mobile",
+      "permissions": [
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.WAKE_LOCK"
+      ]
     },
     "plugins": [
       "@maplibre/maplibre-react-native",
