@@ -7,6 +7,7 @@ export interface Activity {
   state: ActivityState;
   startedAt: number;
   endedAt: number | null;
+  routeId?: number | null;
 }
 
 export interface TrackPoint {
