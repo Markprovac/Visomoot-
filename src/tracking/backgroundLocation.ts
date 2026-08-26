@@ -41,18 +41,28 @@ export async function ensureLocationPermissions(): Promise<boolean> {
 }
 
 export async function startBackgroundTracking() {
+  const taskManagerAvailable = await TaskManager.isAvailableAsync();
+  if (!taskManagerAvailable) {
+    throw new Error('Le suivi GPS en arrière-plan n’est pas disponible sur cette installation.');
+  }
+
+  const backgroundAvailable = await Location.isBackgroundLocationAvailableAsync();
+  if (!backgroundAvailable) {
+    throw new Error('Android ne permet pas le suivi GPS en arrière-plan sur cet appareil.');
+  }
+
   const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
   if (alreadyStarted) return;
 
   await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-    accuracy: Location.Accuracy.BestForNavigation,
+    accuracy: Location.Accuracy.High,
     distanceInterval: 3,
     timeInterval: 2000,
     pausesUpdatesAutomatically: false,
     activityType: Location.ActivityType.Fitness,
     foregroundService: {
       notificationTitle: 'Visomoot — activité en cours',
-      notificationBody: 'Le suivi GPS continue tant que le système ne force pas l’arrêt.',
+      notificationBody: 'Enregistrement GPS en cours en arrière-plan.',
       killServiceOnDestroy: false,
     },
   });
