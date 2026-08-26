@@ -1,34 +1,57 @@
-# RandoRadar — V1 native Android / iPhone
+# Visomoot — V0.2 native Android / iPhone
 
-Base fonctionnelle d'une application outdoor de type Visorando / Komoot avec radar météo.
+Application outdoor personnelle inspirée de Komoot, avec carte topo, création d'itinéraires et météo sur le parcours.
 
-## Déjà inclus dans cette V1
+## V0.2 — déjà inclus
 
-- Application native React Native / Expo (ce n'est pas une PWA)
-- Carte MapLibre Native
-- Position GPS
-- Modes Randonnée, Vélo route, Gravel et VTT
-- Démarrage / pause / reprise / fin d'activité
-- Suivi GPS en arrière-plan
-- Notification Android pendant l'enregistrement
-- Sauvegarde immédiate des points GPS dans SQLite
-- Reprise d'une activité après réouverture de l'application
-- Tracé réel affiché sur la carte
-- Distance, durée, D+, altitude, vitesse et nombre de points GPS
-- Fenêtre d'activité en bas de l'écran, réductible / agrandissable
+- Application native React Native / Expo, sans Capacitor et sans dossier `www`
+- Carte MapLibre Native avec fond OpenTopoMap / OpenStreetMap
+- Position GPS et suivi de l'utilisateur pendant l'activité
+- Randonnée, vélo route, gravel et VTT
+- Enregistrement GPS en arrière-plan avec service Android au premier plan
+- Points GPS sauvegardés immédiatement en SQLite
+- Reprise d'une activité inachevée après réouverture de l'application
+- Tracé réel, distance, durée, D+, altitude et vitesse
 - Historique local des activités
-- Créateur de parcours manuel : toucher la carte pour ajouter des points
-- **Annuler** retire uniquement le dernier point ; **Effacer** supprime tout le tracé en création
-- Enregistrement local des parcours créés
-- Radar RainViewer superposé à la carte
+- Radar RainViewer sur la carte
 
-## Important
+## Nouveau : création de parcours automatique
 
-MapLibre et le GPS en arrière-plan utilisent du code natif : **Expo Go ne suffit pas**. Il faut créer un Development Build ou une APK.
+Le bouton **Créer** n'assemble plus simplement des lignes droites.
 
-## Installation
+1. Touchez la carte pour poser le départ.
+2. Touchez ensuite l'arrivée et éventuellement des étapes intermédiaires.
+3. Visomoot demande à Valhalla de calculer le trajet sur le réseau OpenStreetMap.
+4. Le profil dépend du sport : marche/sentiers, vélo route, gravel ou VTT.
+5. **Annuler** retire la dernière étape et recalcule le parcours.
+6. **Effacer** supprime tout le parcours en cours de création.
+7. **Enregistrer** conserve le tracé dans SQLite et l'associe à l'activité suivante.
 
-Node.js 22.13+ est recommandé pour Expo SDK 57.
+Le routage utilise actuellement le serveur public de démonstration Valhalla de FOSSGIS. Il faut donc une connexion réseau pour créer/recalculer un parcours et respecter son usage raisonnable. Pour une application personnelle, cette solution est adaptée aux tests et à un usage modéré.
+
+## Nouveau : pluie prévue sur le parcours
+
+Dès qu'un itinéraire est calculé, Visomoot échantillonne les positions futures le long du tracé toutes les 15 minutes de progression estimée.
+
+Il interroge Open-Meteo en 15 minutes. En France et en Europe centrale, le service peut exploiter notamment les modèles haute résolution disponibles localement, dont AROME.
+
+Exemple d'alerte affichée :
+
+`🌧 pluie prévue dans 45 min, à 8.1 km devant toi (0.7 mm/15 min).`
+
+Pendant une activité, la prévision est recalculée périodiquement à partir de la progression GPS. Un point bleu météo est également placé sur le parcours à l'endroit de la première pluie détectée.
+
+## Correction importante MapLibre
+
+MapLibre React Native v11 fonctionne uniquement avec la nouvelle architecture React Native. La configuration conserve donc :
+
+`"newArchEnabled": true`
+
+La caméra utilise directement `trackUserLocation="course"`. L'ancien appel impératif `setCamera()` n'est plus utilisé car l'API v11 l'a remplacé et cela pouvait provoquer une erreur au lancement du suivi.
+
+## Installation Android
+
+Node.js 22+ recommandé.
 
 ```bash
 npm install
@@ -36,65 +59,30 @@ npx expo prebuild
 npx expo run:android
 ```
 
-Pour iOS, il faut macOS/Xcode :
+Pour construire l'APK de debug après le prebuild :
 
 ```bash
-npx expo run:ios
+cd android
+gradlew assembleDebug
 ```
 
-## APK Android installable
+APK : `android/app/build/outputs/apk/debug/app-debug.apk`
 
-Le projet est déjà configuré pour Android. Pour une distribution propre, le plus simple est d'utiliser EAS Build, ou Android Studio/Gradle après `expo prebuild`.
+## GPS en arrière-plan
 
-## Permissions GPS
+Visomoot demande la localisation précise et la localisation en arrière-plan et lance un service Android de localisation pendant une activité.
 
-L'application demande :
+- écran éteint : suivi prévu pour continuer ;
+- application en arrière-plan : suivi prévu pour continuer ;
+- application retirée des apps récentes : le service Android est configuré pour ne pas s'arrêter volontairement ;
+- **Forcer l'arrêt** depuis les réglages Android : Android arrête obligatoirement l'application et aucun logiciel ne peut contourner ce comportement ;
+- certains constructeurs peuvent aussi tuer agressivement les applications si l'optimisation batterie n'est pas désactivée.
 
-- localisation précise ;
-- localisation en arrière-plan ;
-- service de localisation au premier plan Android.
+## Services externes
 
-Sur Android 11+, la demande de localisation permanente peut ouvrir les réglages système. Sélectionner l'autorisation permettant l'utilisation en permanence si l'on veut que l'enregistrement continue écran verrouillé.
+- Carte : OpenTopoMap / OpenStreetMap
+- Routage : Valhalla / données OpenStreetMap
+- Prévision sur le parcours : Open-Meteo
+- Radar : RainViewer
 
-## Radar
-
-Le bouton **🌧 Radar** charge la dernière image disponible depuis l'API publique RainViewer et l'affiche au-dessus de la carte.
-
-La version publique RainViewer 2026 fournit l'historique radar récent mais plus la prévision radar future. Il faudra combiner cette couche avec une prévision Météo-France/AROME (par exemple via Open-Meteo) pour la future fonction « pluie sur mon parcours dans 30/60/120 min ».
-
-## Carte
-
-La V1 utilise le style de démonstration MapLibre :
-
-`https://demotiles.maplibre.org/style.json`
-
-Il convient pour le développement. Pour une vraie diffusion de l'application, remplacer ce style par un fournisseur de tuiles adapté ou notre propre infrastructure cartographique.
-
-## Prochaines briques prévues
-
-1. Routage automatique selon le sport avec Valhalla (la V1 trace actuellement des segments manuels entre les points).
-2. Import/export GPX.
-4. Profil altimétrique et D+/D- du parcours prévu.
-5. Détection de sortie d'itinéraire et recalcul.
-6. Guidage vocal.
-7. Cartes/régions hors connexion avec OfflineManager MapLibre.
-8. Prévisions AROME le long de l'itinéraire.
-9. Alerte « pluie devant vous » selon la progression.
-10. Bibliothèque de parcours, favoris, photos et partage.
-
-## Windows : deux raccourcis fournis
-
-- `BUILD_ANDROID.bat` : installe les dépendances, génère Android et lance l'application sur un téléphone connecté / émulateur.
-- `BUILD_APK_DEBUG.bat` : construit une APK de test dans `android\\app\\build\\outputs\\apk\\debug\\app-debug.apk`.
-
-Ces scripts nécessitent Node.js et l'environnement Android (Android Studio / SDK / JDK).
-
-## Limite importante du suivi en arrière-plan
-
-Écran verrouillé ou application simplement passée en arrière-plan : le service de localisation est prévu pour continuer.
-
-En revanche, si l'utilisateur force l'arrêt de l'application, ou si certains constructeurs Android tuent explicitement son processus, le système peut interrompre le suivi. Il faudra tester les réglages d'économie de batterie sur chaque appareil cible.
-
-## Licence radar
-
-L'API publique RainViewer est destinée aux usages personnels, éducatifs et aux petites communautés. Pour une diffusion commerciale ou à fort trafic, il faudra valider les conditions adaptées avec le fournisseur ou choisir une autre source radar.
+Le projet ne contient pas de clé API payante.

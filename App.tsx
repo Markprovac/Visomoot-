@@ -1,7 +1,8 @@
 import './src/tracking/backgroundLocation';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  AppState,
   FlatList,
   Modal,
   Pressable,
@@ -24,9 +25,11 @@ import {
   createActivity,
   finishActivity,
   getRecentActivities,
+  getRoutePoints,
   getTrackPoints,
   getUnfinishedActivity,
   initDb,
+  insertTrackPointIfMeaningful,
   saveRoute,
   setActivityState,
 } from './src/storage/db';
@@ -36,11 +39,33 @@ import {
   stopBackgroundTracking,
 } from './src/tracking/backgroundLocation';
 import { getLatestRadarFrame, RadarFrame } from './src/services/rainviewer';
+import { routeViaWaypoints, RoutedPath } from './src/services/routing';
+import {
+  defaultSportSpeedKmh,
+  forecastRainAhead,
+  RouteWeatherResult,
+} from './src/services/routeWeather';
 import { Activity, SportType, TrackPoint } from './src/types/domain';
 import { computeStats, formatDuration } from './src/utils/geo';
 import { routeDistanceM } from './src/utils/route';
 
-const MAP_STYLE = 'https://demotiles.maplibre.org/style.json';
+const MAP_STYLE = {
+  version: 8,
+  sources: {
+    opentopo: {
+      type: 'raster',
+      tiles: [
+        'https://a.tile.opentopomap.org/{z}/{x}/{y}.png',
+        'https://b.tile.opentopomap.org/{z}/{x}/{y}.png',
+        'https://c.tile.opentopomap.org/{z}/{x}/{y}.png',
+      ],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors, SRTM | OpenTopoMap',
+    },
+  },
+  layers: [{ id: 'opentopo-base', type: 'raster', source: 'opentopo' }],
+};
+
 const SPORTS: Array<{ id: SportType; label: string }> = [
   { id: 'hiking', label: '🥾 Randonnée' },
   { id: 'road_bike', label: '🚴 Route' },
@@ -50,14 +75,39 @@ const SPORTS: Array<{ id: SportType; label: string }> = [
 
 const sportLabel = (sport: SportType) => SPORTS.find((s) => s.id === sport)?.label ?? sport;
 
+function humanRouteTime(seconds: number) {
+  if (!seconds || seconds <= 0) return '';
+  const totalMinutes = Math.max(1, Math.round(seconds / 60));
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return h ? `${h} h ${String(m).padStart(2, '0')}` : `${m} min`;
+}
+
 export default function App() {
+  const appStateRef = useRef(AppState.currentState);
+  const liveCoordinateRef = useRef<[number, number] | null>(null);
+  const liveSpeedRef = useRef<number | null>(null);
+
   const [sport, setSport] = useState<SportType>('hiking');
   const [activity, setActivity] = useState<Activity | null>(null);
   const [points, setPoints] = useState<TrackPoint[]>([]);
   const [expanded, setExpanded] = useState(true);
+  const [liveCoordinate, setLiveCoordinate] = useState<[number, number] | null>(null);
 
   const [planning, setPlanning] = useState(false);
+  const [plannedWaypoints, setPlannedWaypoints] = useState<Array<[number, number]>>([]);
   const [plannedPoints, setPlannedPoints] = useState<Array<[number, number]>>([]);
+  const [routeSummary, setRouteSummary] = useState<RoutedPath | null>(null);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+
+  const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
+  const [selectedRoutePoints, setSelectedRoutePoints] = useState<Array<[number, number]>>([]);
+  const [activeRoutePoints, setActiveRoutePoints] = useState<Array<[number, number]>>([]);
+
+  const [routeWeather, setRouteWeather] = useState<RouteWeatherResult | null>(null);
+  const [weatherBusy, setWeatherBusy] = useState(false);
+  const [weatherTick, setWeatherTick] = useState(0);
 
   const [radarEnabled, setRadarEnabled] = useState(false);
   const [radar, setRadar] = useState<RadarFrame | null>(null);
@@ -66,31 +116,117 @@ export default function App() {
   const [history, setHistory] = useState<Activity[]>([]);
   const [initialCenter, setInitialCenter] = useState<[number, number]>([7.2619, 43.7102]);
 
+  const setLivePosition = (coordinate: [number, number], speedMps?: number | null) => {
+    liveCoordinateRef.current = coordinate;
+    setLiveCoordinate(coordinate);
+    if (speedMps != null && Number.isFinite(speedMps)) liveSpeedRef.current = Math.max(0, speedMps * 3.6);
+  };
+
+  const refreshWeather = async (
+    route: Array<[number, number]>,
+    targetSport: SportType,
+    current: [number, number] | null = null,
+    speedKmh?: number | null,
+  ) => {
+    if (route.length < 2) {
+      setRouteWeather(null);
+      return;
+    }
+
+    setWeatherBusy(true);
+    try {
+      const forecast = await forecastRainAhead(route, targetSport, current, speedKmh);
+      setRouteWeather(forecast);
+    } finally {
+      setWeatherBusy(false);
+    }
+  };
+
+  const loadUnfinishedActivity = async () => {
+    const unfinished = await getUnfinishedActivity();
+    if (!unfinished) return;
+
+    const loadedPoints = await getTrackPoints(unfinished.id);
+    setActivity(unfinished);
+    setSport(unfinished.sport);
+    setPoints(loadedPoints);
+
+    if (unfinished.routeId) {
+      const route = await getRoutePoints(unfinished.routeId);
+      setSelectedRouteId(unfinished.routeId);
+      setSelectedRoutePoints(route);
+      setActiveRoutePoints(route);
+    }
+
+    const lastPoint = loadedPoints[loadedPoints.length - 1];
+    if (lastPoint) {
+      const center: [number, number] = [lastPoint.longitude, lastPoint.latitude];
+      setInitialCenter(center);
+      setLivePosition(center, lastPoint.speed);
+    }
+
+    if (unfinished.state === 'active') {
+      try {
+        const bg = await Location.getBackgroundPermissionsAsync();
+        if (bg.status === 'granted') await startBackgroundTracking();
+      } catch {
+        // l'activité reste récupérable même si Android refuse momentanément de relancer le service
+      }
+    }
+  };
+
   useEffect(() => {
     (async () => {
       await initDb();
-      const unfinished = await getUnfinishedActivity();
-      if (unfinished) {
-        setActivity(unfinished);
-        setSport(unfinished.sport);
-        setPoints(await getTrackPoints(unfinished.id));
-      }
+      await loadUnfinishedActivity();
 
       const fg = await Location.getForegroundPermissionsAsync();
       if (fg.status === 'granted') {
         const last = await Location.getLastKnownPositionAsync();
-        if (last) setInitialCenter([last.coords.longitude, last.coords.latitude]);
+        if (last) {
+          const center: [number, number] = [last.coords.longitude, last.coords.latitude];
+          setInitialCenter(center);
+          setLivePosition(center, last.coords.speed);
+        }
       }
     })();
   }, []);
 
   useEffect(() => {
+    const sub = AppState.addEventListener('change', async (nextState) => {
+      const previous = appStateRef.current;
+      appStateRef.current = nextState;
+      if (previous.match(/inactive|background/) && nextState === 'active') {
+        await loadUnfinishedActivity();
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  useEffect(() => {
     if (!activity) return;
     const timer = setInterval(async () => {
-      setPoints(await getTrackPoints(activity.id));
+      const loaded = await getTrackPoints(activity.id);
+      setPoints(loaded);
+      const last = loaded[loaded.length - 1];
+      if (last) liveSpeedRef.current = Math.max(0, (last.speed ?? 0) * 3.6);
     }, 1500);
     return () => clearInterval(timer);
   }, [activity?.id]);
+
+  useEffect(() => {
+    if (!activity) return;
+    const timer = setInterval(() => setWeatherTick((value) => value + 1), 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [activity?.id]);
+
+  useEffect(() => {
+    if (!activity || activeRoutePoints.length < 2) return;
+    const speed = liveSpeedRef.current && liveSpeedRef.current >= 2
+      ? liveSpeedRef.current
+      : defaultSportSpeedKmh(activity.sport);
+    refreshWeather(activeRoutePoints, activity.sport, liveCoordinateRef.current, speed);
+  }, [activity?.id, activity?.state, activeRoutePoints, weatherTick]);
 
   useEffect(() => {
     if (!radarEnabled) return;
@@ -113,19 +249,57 @@ export default function App() {
     };
   }, [radarEnabled]);
 
+  useEffect(() => {
+    let subscription: Location.LocationSubscription | null = null;
+    let mounted = true;
+
+    (async () => {
+      if (!activity || activity.state !== 'active') return;
+      const fg = await Location.getForegroundPermissionsAsync();
+      if (fg.status !== 'granted') return;
+
+      subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.BestForNavigation,
+          distanceInterval: 3,
+          timeInterval: 2000,
+          mayShowUserSettingsDialog: true,
+        },
+        async (location) => {
+          if (!mounted) return;
+          const center: [number, number] = [location.coords.longitude, location.coords.latitude];
+          setLivePosition(center, location.coords.speed);
+
+          await insertTrackPointIfMeaningful({
+            activityId: activity.id,
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+            altitude: location.coords.altitude ?? null,
+            accuracy: location.coords.accuracy ?? null,
+            speed: location.coords.speed ?? null,
+            heading: location.coords.heading ?? null,
+            timestamp: location.timestamp || Date.now(),
+          });
+        },
+      );
+    })();
+
+    return () => {
+      mounted = false;
+      subscription?.remove();
+    };
+  }, [activity?.id, activity?.state]);
+
   const stats = useMemo(
     () => (activity ? computeStats(points, activity.startedAt, activity.endedAt) : null),
     [activity, points],
   );
 
-  const lineGeoJson = useMemo(
+  const actualTrackGeoJson = useMemo(
     () => ({
       type: 'Feature' as const,
       properties: {},
-      geometry: {
-        type: 'LineString' as const,
-        coordinates: points.map((p) => [p.longitude, p.latitude]),
-      },
+      geometry: { type: 'LineString' as const, coordinates: points.map((p) => [p.longitude, p.latitude]) },
     }),
     [points],
   );
@@ -134,75 +308,171 @@ export default function App() {
     () => ({
       type: 'Feature' as const,
       properties: {},
-      geometry: {
-        type: 'LineString' as const,
-        coordinates: plannedPoints,
-      },
+      geometry: { type: 'LineString' as const, coordinates: plannedPoints },
     }),
     [plannedPoints],
   );
 
-  const plannedPointGeoJson = useMemo(
+  const plannedWaypointGeoJson = useMemo(
     () => ({
       type: 'FeatureCollection' as const,
-      features: plannedPoints.map((coordinate, index) => ({
+      features: plannedWaypoints.map((coordinate, index) => ({
         type: 'Feature' as const,
         properties: { index: index + 1 },
         geometry: { type: 'Point' as const, coordinates: coordinate },
       })),
     }),
-    [plannedPoints],
+    [plannedWaypoints],
   );
 
-  const plannedDistance = useMemo(() => routeDistanceM(plannedPoints), [plannedPoints]);
+  const displayRoutePoints = activity ? activeRoutePoints : selectedRoutePoints;
+  const selectedLineGeoJson = useMemo(
+    () => ({
+      type: 'Feature' as const,
+      properties: {},
+      geometry: { type: 'LineString' as const, coordinates: displayRoutePoints },
+    }),
+    [displayRoutePoints],
+  );
+
+  const weatherPointGeoJson = useMemo(() => {
+    if (!routeWeather?.alert) return null;
+    return {
+      type: 'Feature' as const,
+      properties: {},
+      geometry: { type: 'Point' as const, coordinates: routeWeather.alert.coordinate },
+    };
+  }, [routeWeather]);
+
+  const plannedDistance = useMemo(
+    () => routeSummary?.distanceM ?? routeDistanceM(plannedPoints),
+    [routeSummary, plannedPoints],
+  );
+  const selectedDistance = useMemo(() => routeDistanceM(selectedRoutePoints), [selectedRoutePoints]);
+
+  const calculatePlannerRoute = async (waypoints: Array<[number, number]>, targetSport: SportType) => {
+    setRouteError(null);
+    setRouteWeather(null);
+
+    if (waypoints.length === 0) {
+      setPlannedPoints([]);
+      setRouteSummary(null);
+      return;
+    }
+
+    if (waypoints.length === 1) {
+      setPlannedPoints([waypoints[0]]);
+      setRouteSummary(null);
+      return;
+    }
+
+    setRouteBusy(true);
+    try {
+      const routed = await routeViaWaypoints(waypoints, targetSport);
+      setPlannedPoints(routed.coordinates);
+      setRouteSummary(routed);
+      const averageSpeed = routed.durationS > 0
+        ? (routed.distanceM / 1000) / (routed.durationS / 3600)
+        : defaultSportSpeedKmh(targetSport);
+      await refreshWeather(routed.coordinates, targetSport, null, averageSpeed);
+    } catch (error: any) {
+      setRouteError(error?.message || 'Impossible de calculer le parcours.');
+    } finally {
+      setRouteBusy(false);
+    }
+  };
+
+  const selectSport = async (nextSport: SportType) => {
+    if (activity) return;
+    setSport(nextSport);
+    if (planning && plannedWaypoints.length >= 2) {
+      await calculatePlannerRoute(plannedWaypoints, nextSport);
+    }
+  };
 
   const start = async () => {
     if (activity) return;
     setPlanning(false);
 
-    const ok = await ensureLocationPermissions();
-    if (!ok) {
-      Alert.alert(
-        'Autorisation GPS nécessaire',
-        "Pour enregistrer une activité écran éteint, autorise la localisation en permanence dans les réglages du téléphone.",
-      );
-      return;
-    }
+    try {
+      const ok = await ensureLocationPermissions();
+      if (!ok) {
+        Alert.alert(
+          'Autorisation GPS nécessaire',
+          "Pour enregistrer une activité écran éteint, autorise la localisation en permanence dans les réglages du téléphone.",
+        );
+        return;
+      }
 
-    const created = await createActivity(sport);
-    setActivity(created);
-    setPoints([]);
-    setExpanded(true);
-    await startBackgroundTracking();
+      const routeForActivity = selectedRouteId ? selectedRoutePoints : [];
+      const created = await createActivity(sport, selectedRouteId);
+      setActivity(created);
+      setActiveRoutePoints(routeForActivity);
+      setPoints([]);
+      setExpanded(true);
+
+      try {
+        const current = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.BestForNavigation });
+        const center: [number, number] = [current.coords.longitude, current.coords.latitude];
+        setLivePosition(center, current.coords.speed);
+        setInitialCenter(center);
+
+        await insertTrackPointIfMeaningful({
+          activityId: created.id,
+          latitude: current.coords.latitude,
+          longitude: current.coords.longitude,
+          altitude: current.coords.altitude ?? null,
+          accuracy: current.coords.accuracy ?? null,
+          speed: current.coords.speed ?? null,
+          heading: current.coords.heading ?? null,
+          timestamp: current.timestamp || Date.now(),
+        });
+      } catch {
+        // Le premier fix peut arriver quelques secondes après le départ.
+      }
+
+      await startBackgroundTracking();
+      setPoints(await getTrackPoints(created.id));
+    } catch (error: any) {
+      Alert.alert('Erreur Visomoot', error?.message || 'Impossible de démarrer l’activité.');
+    }
   };
 
   const pauseResume = async () => {
     if (!activity) return;
-
-    if (activity.state === 'active') {
-      await stopBackgroundTracking();
-      await setActivityState(activity.id, 'paused');
-      setActivity({ ...activity, state: 'paused' });
-    } else {
-      await setActivityState(activity.id, 'active');
-      setActivity({ ...activity, state: 'active' });
-      await startBackgroundTracking();
+    try {
+      if (activity.state === 'active') {
+        await stopBackgroundTracking();
+        await setActivityState(activity.id, 'paused');
+        setActivity({ ...activity, state: 'paused' });
+      } else {
+        await setActivityState(activity.id, 'active');
+        setActivity({ ...activity, state: 'active' });
+        await startBackgroundTracking();
+      }
+    } catch (error: any) {
+      Alert.alert('Erreur Visomoot', error?.message || 'Impossible de changer l’état de l’activité.');
     }
   };
 
   const stop = () => {
     if (!activity) return;
-
     Alert.alert('Terminer l’activité ?', 'Le parcours restera enregistré dans le téléphone.', [
       { text: 'Annuler', style: 'cancel' },
       {
         text: 'Terminer',
         style: 'destructive',
         onPress: async () => {
-          await stopBackgroundTracking();
-          await finishActivity(activity.id);
-          setActivity(null);
-          setPoints([]);
+          try {
+            await stopBackgroundTracking();
+            await finishActivity(activity.id);
+            setActivity(null);
+            setPoints([]);
+            setActiveRoutePoints([]);
+            setRouteWeather(null);
+          } catch (error: any) {
+            Alert.alert('Erreur Visomoot', error?.message || 'Impossible de terminer l’activité.');
+          }
         },
       },
     ]);
@@ -216,31 +486,45 @@ export default function App() {
   const togglePlanning = () => {
     if (activity) return;
     setPlanning((value) => !value);
+    setRouteError(null);
   };
 
-  const onMapPress = (event: any) => {
-    if (!planning || activity) return;
+  const onMapPress = async (event: any) => {
+    if (!planning || activity || routeBusy) return;
     const lngLat = event?.nativeEvent?.lngLat;
     if (!Array.isArray(lngLat) || lngLat.length < 2) return;
-    setPlannedPoints((current) => [...current, [Number(lngLat[0]), Number(lngLat[1])]]);
+    const coordinate: [number, number] = [Number(lngLat[0]), Number(lngLat[1])];
+    const nextWaypoints = [...plannedWaypoints, coordinate];
+    setPlannedWaypoints(nextWaypoints);
+    await calculatePlannerRoute(nextWaypoints, sport);
   };
 
-  const undoPlanningPoint = () => {
-    setPlannedPoints((current) => current.slice(0, -1));
+  const undoPlanningPoint = async () => {
+    if (routeBusy || plannedWaypoints.length === 0) return;
+    const nextWaypoints = plannedWaypoints.slice(0, -1);
+    setPlannedWaypoints(nextWaypoints);
+    await calculatePlannerRoute(nextWaypoints, sport);
   };
 
   const clearPlanning = () => {
+    if (routeBusy) return;
+    setPlannedWaypoints([]);
     setPlannedPoints([]);
+    setRouteSummary(null);
+    setRouteWeather(null);
+    setRouteError(null);
   };
 
   const savePlannedRoute = async () => {
-    if (plannedPoints.length < 2) {
-      Alert.alert('Parcours incomplet', 'Ajoute au moins deux points sur la carte.');
+    if (plannedWaypoints.length < 2 || plannedPoints.length < 2) {
+      Alert.alert('Parcours incomplet', 'Ajoute au moins un départ et une arrivée sur la carte.');
       return;
     }
 
     const route = await saveRoute(sport, plannedPoints);
-    Alert.alert('Parcours enregistré', `${route.name}\n${(plannedDistance / 1000).toFixed(2)} km`);
+    setSelectedRouteId(route.id);
+    setSelectedRoutePoints(plannedPoints);
+    Alert.alert('Parcours prêt', `${route.name}\n${(plannedDistance / 1000).toFixed(2)} km`);
     setPlanning(false);
   };
 
@@ -248,31 +532,32 @@ export default function App() {
     <View style={styles.root}>
       <StatusBar style="dark" />
 
-      <Map
-        style={styles.map}
-        mapStyle={MAP_STYLE}
-        logo
-        attribution
-        compass
-        onPress={onMapPress}
-      >
+      <Map style={styles.map} mapStyle={MAP_STYLE as any} logo attribution compass onPress={onMapPress}>
         <Camera
           initialViewState={{ center: initialCenter, zoom: 13 }}
           trackUserLocation={activity?.state === 'active' ? 'course' : undefined}
+          zoom={activity?.state === 'active' ? 15.5 : undefined}
         />
         <UserLocation animated accuracy heading />
 
+        {!planning && displayRoutePoints.length >= 2 && (
+          <GeoJSONSource id="selected-route" data={selectedLineGeoJson}>
+            <Layer
+              id="selected-route-line"
+              type="line"
+              source="selected-route"
+              paint={{ 'line-color': '#E05B21', 'line-width': 6, 'line-opacity': 0.82 }}
+            />
+          </GeoJSONSource>
+        )}
+
         {points.length >= 2 && (
-          <GeoJSONSource id="activity-track" data={lineGeoJson}>
+          <GeoJSONSource id="activity-track" data={actualTrackGeoJson}>
             <Layer
               id="activity-line"
               type="line"
               source="activity-track"
-              paint={{
-                'line-color': '#1565C0',
-                'line-width': 5,
-                'line-opacity': 0.95,
-              }}
+              paint={{ 'line-color': '#1565C0', 'line-width': 5, 'line-opacity': 0.95 }}
             />
           </GeoJSONSource>
         )}
@@ -283,27 +568,38 @@ export default function App() {
               id="planned-route-line"
               type="line"
               source="planned-route"
-              paint={{
-                'line-color': '#E05B21',
-                'line-width': 5,
-                'line-opacity': 0.95,
-                'line-dasharray': [1.6, 1.1],
-              }}
+              paint={{ 'line-color': '#E05B21', 'line-width': 6, 'line-opacity': 0.95 }}
             />
           </GeoJSONSource>
         )}
 
-        {planning && plannedPoints.length > 0 && (
-          <GeoJSONSource id="planned-points" data={plannedPointGeoJson}>
+        {planning && plannedWaypoints.length > 0 && (
+          <GeoJSONSource id="planned-waypoints" data={plannedWaypointGeoJson}>
             <Layer
-              id="planned-points-layer"
+              id="planned-waypoints-layer"
               type="circle"
-              source="planned-points"
+              source="planned-waypoints"
               paint={{
                 'circle-radius': 7,
                 'circle-color': '#FFFFFF',
                 'circle-stroke-color': '#E05B21',
                 'circle-stroke-width': 3,
+              }}
+            />
+          </GeoJSONSource>
+        )}
+
+        {weatherPointGeoJson && (
+          <GeoJSONSource id="weather-alert" data={weatherPointGeoJson}>
+            <Layer
+              id="weather-alert-point"
+              type="circle"
+              source="weather-alert"
+              paint={{
+                'circle-radius': 10,
+                'circle-color': '#1976D2',
+                'circle-stroke-color': '#FFFFFF',
+                'circle-stroke-width': 4,
               }}
             />
           </GeoJSONSource>
@@ -334,13 +630,11 @@ export default function App() {
             {SPORTS.map((item) => (
               <Pressable
                 key={item.id}
-                disabled={!!activity}
-                onPress={() => setSport(item.id)}
+                disabled={!!activity || routeBusy}
+                onPress={() => selectSport(item.id)}
                 style={[styles.sportChip, sport === item.id && styles.sportChipActive]}
               >
-                <Text style={[styles.sportText, sport === item.id && styles.sportTextActive]}>
-                  {item.label}
-                </Text>
+                <Text style={[styles.sportText, sport === item.id && styles.sportTextActive]}>{item.label}</Text>
               </Pressable>
             ))}
           </View>
@@ -368,9 +662,9 @@ export default function App() {
         {!activity && planning ? (
           <View style={styles.plannerCard}>
             <View style={styles.plannerHeader}>
-              <View>
+              <View style={{ flex: 1, paddingRight: 8 }}>
                 <Text style={styles.cardTitle}>Création de parcours</Text>
-                <Text style={styles.cardSubTitle}>Touchez la carte pour ajouter des points</Text>
+                <Text style={styles.cardSubTitle}>Touchez la carte : le tracé suit automatiquement routes et chemins.</Text>
               </View>
               <Pressable onPress={() => setPlanning(false)}>
                 <Text style={styles.closePlanner}>Fermer</Text>
@@ -378,32 +672,51 @@ export default function App() {
             </View>
 
             <View style={styles.plannerSummary}>
-              <Text style={styles.plannerDistance}>{(plannedDistance / 1000).toFixed(2)} km</Text>
-              <Text style={styles.plannerMeta}>{plannedPoints.length} point{plannedPoints.length > 1 ? 's' : ''} · tracé manuel V1</Text>
+              <Text style={styles.plannerDistance}>
+                {routeBusy ? 'Calcul…' : `${(plannedDistance / 1000).toFixed(2)} km`}
+              </Text>
+              <Text style={styles.plannerMeta}>
+                {plannedWaypoints.length} étape{plannedWaypoints.length > 1 ? 's' : ''}
+                {routeSummary?.durationS ? ` · ${humanRouteTime(routeSummary.durationS)}` : ''}
+                {' · '}routage {sport === 'hiking' ? 'piéton/sentiers' : sport === 'road_bike' ? 'vélo route' : sport === 'gravel' ? 'gravel' : 'VTT'}
+              </Text>
+              {routeError && <Text style={styles.routeError}>{routeError}</Text>}
             </View>
+
+            <WeatherStrip forecast={routeWeather} loading={weatherBusy || routeBusy} />
 
             <View style={styles.plannerButtons}>
               <Pressable
                 onPress={undoPlanningPoint}
-                disabled={plannedPoints.length === 0}
-                style={[styles.plannerSmallButton, plannedPoints.length === 0 && styles.disabled]}
+                disabled={plannedWaypoints.length === 0 || routeBusy}
+                style={[styles.plannerSmallButton, (plannedWaypoints.length === 0 || routeBusy) && styles.disabled]}
               >
                 <Text style={styles.plannerSmallText}>↶ Annuler</Text>
               </Pressable>
               <Pressable
                 onPress={clearPlanning}
-                disabled={plannedPoints.length === 0}
-                style={[styles.plannerSmallButton, plannedPoints.length === 0 && styles.disabled]}
+                disabled={plannedWaypoints.length === 0 || routeBusy}
+                style={[styles.plannerSmallButton, (plannedWaypoints.length === 0 || routeBusy) && styles.disabled]}
               >
                 <Text style={styles.plannerSmallText}>🗑 Effacer</Text>
               </Pressable>
-              <Pressable onPress={savePlannedRoute} style={styles.saveRouteButton}>
+              <Pressable
+                onPress={savePlannedRoute}
+                disabled={plannedWaypoints.length < 2 || routeBusy}
+                style={[styles.saveRouteButton, (plannedWaypoints.length < 2 || routeBusy) && styles.disabled]}
+              >
                 <Text style={styles.saveRouteText}>Enregistrer</Text>
               </Pressable>
             </View>
           </View>
         ) : !activity ? (
           <View style={styles.startWrap}>
+            {selectedRoutePoints.length >= 2 && (
+              <View style={styles.readyRouteCard}>
+                <Text style={styles.readyRouteTitle}>🧭 Parcours prêt · {(selectedDistance / 1000).toFixed(2)} km</Text>
+                <WeatherStrip forecast={routeWeather} loading={weatherBusy} compact />
+              </View>
+            )}
             <Pressable onPress={start} style={styles.startButton}>
               <Text style={styles.startButtonText}>Démarrer — {sportLabel(sport)}</Text>
             </Pressable>
@@ -414,7 +727,7 @@ export default function App() {
               <View>
                 <Text style={styles.cardTitle}>{sportLabel(activity.sport)} en cours</Text>
                 <Text style={styles.cardSubTitle}>
-                  {activity.state === 'paused' ? 'En pause' : 'GPS actif'} · toucher pour {expanded ? 'réduire' : 'agrandir'}
+                  {activity.state === 'paused' ? 'En pause' : 'GPS actif en arrière-plan'} · toucher pour {expanded ? 'réduire' : 'agrandir'}
                 </Text>
               </View>
               <Text style={styles.chevron}>{expanded ? '⌄' : '⌃'}</Text>
@@ -422,6 +735,8 @@ export default function App() {
 
             {expanded && stats && (
               <>
+                {activeRoutePoints.length >= 2 && <WeatherStrip forecast={routeWeather} loading={weatherBusy} />}
+
                 <View style={styles.statsGrid}>
                   <Stat label="Distance" value={`${(stats.distanceM / 1000).toFixed(2)} km`} />
                   <Stat label="Temps" value={formatDuration(stats.durationS)} />
@@ -481,6 +796,29 @@ export default function App() {
   );
 }
 
+function WeatherStrip({
+  forecast,
+  loading,
+  compact = false,
+}: {
+  forecast: RouteWeatherResult | null;
+  loading: boolean;
+  compact?: boolean;
+}) {
+  const text = loading
+    ? '🌦 Analyse météo du parcours…'
+    : forecast?.summary ?? '🌦 La météo du parcours apparaîtra ici.';
+
+  return (
+    <View style={[styles.weatherStrip, forecast?.status === 'rain' && styles.weatherStripRain, compact && styles.weatherStripCompact]}>
+      <Text style={styles.weatherText}>{text}</Text>
+      {!loading && forecast && (
+        <Text style={styles.weatherSource}>Prévision 15 min · Open-Meteo / modèles locaux dont AROME en France</Text>
+      )}
+    </View>
+  );
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.statBox}>
@@ -507,9 +845,11 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.42 },
   actionText: { fontWeight: '800', color: '#24343D' },
 
-  startWrap: { padding: 14 },
+  startWrap: { padding: 14, gap: 9 },
   startButton: { backgroundColor: '#163F2B', borderRadius: 22, paddingVertical: 16, alignItems: 'center', elevation: 5 },
   startButtonText: { color: '#FFFFFF', fontSize: 16, fontWeight: '900' },
+  readyRouteCard: { backgroundColor: 'rgba(255,255,255,0.97)', borderRadius: 18, padding: 11, elevation: 4 },
+  readyRouteTitle: { fontWeight: '900', color: '#172A22', marginBottom: 7 },
 
   plannerCard: { margin: 10, backgroundColor: 'rgba(255,255,255,0.98)', borderRadius: 24, padding: 14, elevation: 8 },
   plannerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -517,11 +857,18 @@ const styles = StyleSheet.create({
   plannerSummary: { marginTop: 12, backgroundColor: '#FFF4EE', borderRadius: 16, padding: 12 },
   plannerDistance: { fontSize: 22, fontWeight: '900', color: '#A84418' },
   plannerMeta: { marginTop: 2, color: '#7A6257', fontSize: 12 },
+  routeError: { marginTop: 7, fontSize: 12, fontWeight: '700', color: '#A62828' },
   plannerButtons: { flexDirection: 'row', gap: 8, marginTop: 12 },
   plannerSmallButton: { paddingHorizontal: 12, paddingVertical: 12, backgroundColor: '#ECEFED', borderRadius: 14, alignItems: 'center' },
   plannerSmallText: { fontWeight: '800', color: '#36453E' },
   saveRouteButton: { flex: 1, paddingVertical: 12, backgroundColor: '#E05B21', borderRadius: 14, alignItems: 'center' },
   saveRouteText: { color: '#FFFFFF', fontWeight: '900' },
+
+  weatherStrip: { marginTop: 10, backgroundColor: '#EAF4FF', borderRadius: 14, padding: 10 },
+  weatherStripRain: { backgroundColor: '#DCEBFF' },
+  weatherStripCompact: { marginTop: 0 },
+  weatherText: { color: '#173A5E', fontWeight: '800', fontSize: 12 },
+  weatherSource: { marginTop: 4, color: '#61778B', fontSize: 9 },
 
   activityCard: { margin: 10, backgroundColor: 'rgba(255,255,255,0.98)', borderRadius: 24, padding: 14, elevation: 8 },
   activityCardCollapsed: { paddingBottom: 10 },
