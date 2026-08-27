@@ -9,39 +9,71 @@ export interface KnownRouteSummary {
   center?: [number, number];
 }
 
+// Instances publiques actuellement recommandées / disponibles.
+// private.coffee est l'ancien service kumi.systems.
 const OVERPASS_ENDPOINTS = [
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://lz4.overpass-api.de/api/interpreter',
-  'https://z.overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.maprva.org/api/interpreter',
 ];
 
 function routeFilterForSport(sport: SportType) {
-  if (sport === 'hiking') return '^(hiking|foot)$';
+  if (sport === 'hiking') return '^(hiking|foot|walking)$';
   if (sport === 'mtb') return '^(mtb|bicycle)$';
-  return '^bicycle$';
+  return '^(bicycle|cycling)$';
+}
+
+function bboxAround(center: [number, number], radiusM: number) {
+  const [longitude, latitude] = center;
+  const latDelta = radiusM / 111_320;
+  const cosLat = Math.max(0.2, Math.cos((latitude * Math.PI) / 180));
+  const lonDelta = radiusM / (111_320 * cosLat);
+
+  return {
+    south: latitude - latDelta,
+    west: longitude - lonDelta,
+    north: latitude + latDelta,
+    east: longitude + lonDelta,
+  };
 }
 
 async function fetchOverpassJson(query: string): Promise<any> {
   const failures: string[] = [];
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 35_000);
+
     try {
-      // GET est volontaire ici : certains proxys/versions Android renvoient 406
-      // sur les POST application/x-www-form-urlencoded vers Overpass.
-      const url = `${endpoint}?data=${encodeURIComponent(query)}`;
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
+      // Overpass recommande POST avec le paramètre de formulaire "data".
+      // Les GET ?data=... sont actuellement rejetés par certaines instances
+      // avec HTTP 406, ce qui expliquait l'échec de la v0.7.1.
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'User-Agent': 'Visomoot/0.7.2 (personal outdoor application)',
+        },
+        body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal,
       });
 
       if (response.ok) {
-        return await response.json();
+        const text = await response.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          failures.push(`${response.status} réponse non JSON`);
+          continue;
+        }
       }
 
       failures.push(`${response.status}`);
-    } catch {
-      failures.push('réseau');
+    } catch (error: any) {
+      failures.push(error?.name === 'AbortError' ? 'délai dépassé' : 'réseau');
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -54,14 +86,18 @@ export async function findKnownRoutes(
   sport: SportType,
   radiusM = 25000,
 ): Promise<KnownRouteSummary[]> {
-  const [longitude, latitude] = center;
   const routePattern = routeFilterForSport(sport);
+  const { south, west, north, east } = bboxAround(center, radiusM);
+
+  // Une bbox est beaucoup moins coûteuse pour Overpass que relation(around:...)
+  // sur 25 km et évite les erreurs serveur 500 observées autour de Levens.
   const query = `
 [out:json][timeout:25];
-relation(around:${Math.round(radiusM)},${latitude},${longitude})
+relation
   ["type"="route"]
-  ["route"~"${routePattern}"];
-out tags center 80;
+  ["route"~"${routePattern}"]
+  (${south.toFixed(6)},${west.toFixed(6)},${north.toFixed(6)},${east.toFixed(6)});
+out tags center 100;
 `;
 
   const data = await fetchOverpassJson(query);
@@ -82,7 +118,7 @@ out tags center 80;
         routeType: element?.tags?.route ? String(element.tags.route) : 'route',
         center:
           element.center && Number.isFinite(Number(element.center.lon)) && Number.isFinite(Number(element.center.lat))
-            ? [Number(element.center.lon), Number(element.center.lat)] as [number, number]
+            ? ([Number(element.center.lon), Number(element.center.lat)] as [number, number])
             : undefined,
       } as KnownRouteSummary;
     })
